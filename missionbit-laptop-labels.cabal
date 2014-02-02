@@ -16,10 +16,16 @@ build-type:          Simple
 extra-source-files:  README.md
 cabal-version:       >=1.10
 
-executable missionbit-laptop-labels
-  -- main-is:             
+executable laptop-labels
+  main-is:             Labels.hs
   -- other-modules:       
   -- other-extensions:    
-  build-depends:       base >=4.6 && <4.7
+  build-depends:       base >=4.6 && <4.7,
+                       diagrams,
+                       diagrams-qrcode,
+                       sqlite-simple,
+                       vector,
+                       text
   -- hs-source-dirs:      
   default-language:    Haskell2010
+  ghc-options: -O2 -Wall
