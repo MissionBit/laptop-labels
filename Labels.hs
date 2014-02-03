@@ -3,6 +3,7 @@ import System.Environment ( getArgs )
 import System.Exit ( exitFailure )
 import System.IO ( stderr, hPutStrLn )
 import Data.Text ( Text )
+import qualified Data.Text as T
 import Data.List ( group )
 import Control.Applicative ( (<$>), (<*>), (*>) )
 import qualified Database.SQLite.Simple as SQL
@@ -19,6 +20,35 @@ import qualified Text.Blaze.Svg11 as S
 import qualified Text.Blaze.Svg11.Attributes as A
 import Text.Blaze ( toValue, toMarkup, preEscapedToMarkup )
 import Control.Monad ( when )
+import Data.Monoid ( mempty, (<>) )
+import System.Console.GetOpt
+  ( ArgOrder(..), OptDescr(..), ArgDescr(..), getOpt, usageInfo )
+import Safe ( readMay )
+
+data Flags =
+  Flags
+  { fNames :: Maybe [String]
+  , fDb    :: Maybe String
+  , fSkip  :: Maybe Int }
+
+defaultFlags :: Flags
+defaultFlags = Flags { fNames = Nothing, fDb = Nothing, fSkip = Nothing }
+
+setDb :: Maybe String -> Flags -> Flags
+setDb db f = f { fDb = db }
+
+addName :: Maybe String -> Flags -> Flags
+addName n f = f { fNames = fmap (:[]) n <> fNames f }
+
+setSkip :: Maybe String -> Flags -> Flags
+setSkip s f = f { fSkip = s >>= readMay }
+
+options :: [OptDescr (Flags -> Flags)]
+options =
+  [ Option ['d'] ["db"]   (OptArg setDb   "FILE") "read labels from SQLite3 db"
+  , Option ['n'] ["name"] (OptArg addName "NAME") "print label for only NAME"
+  , Option ['s'] ["skip"] (OptArg setSkip "SKIP") "number of labels to skip"
+  ]
 
 raw :: Text -> S.Svg
 raw = preEscapedToMarkup
@@ -118,10 +148,11 @@ getLabels conn = SQL.query_ conn q
         \.label { stroke: #ccc; stroke-width: 1; fill: none; }\n\
         \.qr { stroke: #000; stroke-width: 1; fill: none; }\n\
 -}
-renderLabels :: Layout -> [Label] -> IO L8.ByteString
+renderLabels :: Layout -> [Maybe Label] -> IO L8.ByteString
 renderLabels layout ls =
-  go <$> mapM (\l -> renderLabel layout l <$> labelQRCode l) ls
+  go <$> mapM f ls
   where
+    f = maybe (return mempty) (\l -> renderLabel layout l <$> labelQRCode l)
     go = renderSvg . combine . layoutPages layout
     combine pages = do
       raw
@@ -160,9 +191,6 @@ renderLabel layout label (qrSize, qr) =
   S.g
   ! A.class_ "label"
   $ do
-    -- S.rect
-    --   ! A.width (toValue w)
-    --   ! A.height (toValue h)
     qr ! A.transform (S.translate (inch (1/8)) ((h - qw)/2))
     S.text_ (toMarkup (lSerialNo label))
       ! A.x tx
@@ -217,7 +245,15 @@ labelQRCode label =
 
 main :: IO ()
 main = do
-  db <- getArgs >>= \x -> case x of
-    [db] -> return db
-    _    -> die "USAGE: laptop-labels DATABASE"
-  L8.putStrLn =<< renderLabels avery48160 =<< SQL.withConnection db getLabels
+  let header = "Usage: laptop-labels [OPTION...]"
+      info   = usageInfo header options
+  opts <- getArgs >>= \args -> case getOpt Permute options args of
+    (o, [], [])  -> return (foldl (flip id) defaultFlags o)
+    (_, _, errs) -> die (concat errs ++ info)
+  db <- maybe (die $ "db is a required argument\n" ++ info) return (fDb opts)
+  let skips = maybe [] (`replicate` Nothing) (fSkip opts)
+      labelFilter names = filter ((`elem` map T.pack names) . lName)
+      keep = maybe id labelFilter (fNames opts)
+  labels <- (skips++) . map Just . keep <$> SQL.withConnection db getLabels
+  svg <- renderLabels avery48160 labels
+  L8.putStrLn svg
