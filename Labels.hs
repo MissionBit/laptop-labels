@@ -142,12 +142,6 @@ q = "SELECT serial_no, name, cpu_type, current_processor_speed,\
 getLabels :: SQL.Connection -> IO [Label]
 getLabels conn = SQL.query_ conn q
 
-{-
-        \body { margin: 0; padding: 0; }\n\
-        \svg { display: block; width: 100%; height: 100%; margin: 0; padding: 0; page-break-after: always; }\n\
-        \.label { stroke: #ccc; stroke-width: 1; fill: none; }\n\
-        \.qr { stroke: #000; stroke-width: 1; fill: none; }\n\
--}
 renderLabels :: Layout -> [Maybe Label] -> IO L8.ByteString
 renderLabels layout ls =
   go <$> mapM f ls
