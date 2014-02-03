@@ -1,0 +1,7 @@
+@import url("source-code-pro/stylesheet.css");
+body { margin: 0; padding: 0; }
+svg { display: block; width: 100%; height: 100%; margin: 0; padding: 0; page-break-after: always; }
+
+.qr { stroke: #000; stroke-width: 1; fill: none; }
+text { stroke: none; fill: #000; font-size: 9px; font-family: "SourceCodeProExtraLight"; }
+text.name { stroke: #000; stroke-width: 0.5; }
