@@ -4,38 +4,46 @@ import System.Exit ( exitFailure )
 import System.IO ( stderr, hPutStrLn )
 import Data.Text ( Text )
 import qualified Data.Text as T
-import Data.List ( group )
-import Control.Applicative ( (<$>), (<*>), (*>) )
+import qualified Data.Text.Encoding as T
+import Control.Applicative ( (<$>), (<*>) )
 import qualified Database.SQLite.Simple as SQL
 import Database.SQLite.Simple.FromRow ( FromRow, field )
-import Data.Text.Encoding ( encodeUtf8 )
 import Text.Blaze.Svg.Renderer.Utf8 ( renderSvg )
 import qualified Data.ByteString.Lazy.Char8 as L8
 import qualified Data.ByteString as B
-import qualified Data.QRCode as QR
+import qualified Data.ByteString.Char8 as B8
+import qualified Codec.Binary.QRCode as QR
 import Network.HTTP.Types.URI ( renderQuery )
 import Data.List.Split ( chunksOf )
-import Text.Blaze.Svg11 ( (!), m, hr, mkPath )
+import Text.Blaze.Svg11 ( (!) )
+import qualified Data.Array as Array
 import qualified Text.Blaze.Svg11 as S
 import qualified Text.Blaze.Svg11.Attributes as A
 import Text.Blaze ( toValue, toMarkup, preEscapedToMarkup )
-import Control.Monad ( when )
+import Control.Monad ( when, foldM, void )
 import Data.Monoid ( mempty, (<>) )
 import System.Console.GetOpt
   ( ArgOrder(..), OptDescr(..), ArgDescr(..), getOpt, usageInfo )
 import Safe ( readMay )
+import Data.Csv ( FromNamedRecord(..), decodeByName, (.:) )
+import Data.Foldable (toList)
+import qualified Data.ByteString.Lazy as BL
+import Data.Char (isAscii)
+
+data DbType = SqliteDb | CsvDb
 
 data Flags =
   Flags
   { fNames :: Maybe [String]
-  , fDb    :: Maybe String
+  , fDb    :: Maybe (DbType, String)
+  , fCsv   :: Maybe String
   , fSkip  :: Maybe Int }
 
 defaultFlags :: Flags
-defaultFlags = Flags { fNames = Nothing, fDb = Nothing, fSkip = Nothing }
+defaultFlags = Flags { fNames = Nothing, fDb = Nothing, fSkip = Nothing, fCsv = Nothing }
 
-setDb :: Maybe String -> Flags -> Flags
-setDb db f = f { fDb = db }
+setDb :: DbType -> Maybe String -> Flags -> Flags
+setDb dbType db f = f { fDb = (,) dbType <$> db }
 
 addName :: Maybe String -> Flags -> Flags
 addName n f = f { fNames = fmap (:[]) n <> fNames f }
@@ -45,9 +53,10 @@ setSkip s f = f { fSkip = s >>= readMay }
 
 options :: [OptDescr (Flags -> Flags)]
 options =
-  [ Option ['d'] ["db"]   (OptArg setDb   "FILE") "read labels from SQLite3 db"
-  , Option ['n'] ["name"] (OptArg addName "NAME") "print label for only NAME"
-  , Option ['s'] ["skip"] (OptArg setSkip "SKIP") "number of labels to skip"
+  [ Option ['d'] ["db"]   (OptArg (setDb SqliteDb) "FILE") "read labels from SQLite3 db"
+  , Option ['c'] ["csv"]  (OptArg (setDb CsvDb)    "FILE") "read labels from Meraki CSV"
+  , Option ['n'] ["name"] (OptArg addName          "NAME") "print label for only NAME"
+  , Option ['s'] ["skip"] (OptArg setSkip          "SKIP") "number of labels to skip"
   ]
 
 raw :: Text -> S.Svg
@@ -68,13 +77,12 @@ data Layout =
 
 data Label =
   Label
-  { lSerialNo              :: Text
-  , lName                  :: Text
-  , lCpuType               :: Text
-  , lCurrentProcessorSpeed :: Text
-  , lNumberProcessors      :: Text
-  , lPhysicalMemory        :: Text
-  , lMachineModel          :: Text
+  { lSerialNo              :: !Text
+  , lName                  :: !Text
+  , lCpuType               :: !Text
+  , lCurrentProcessorSpeed :: !Text
+  , lPhysicalMemory        :: !Text
+  , lMachineModel          :: !Text
   }
   deriving ( Show, Eq )
 
@@ -105,48 +113,59 @@ labelOrigins layout =
     rows = lRows layout
     cols = lCols layout
 
-labelUrl :: Label -> B.ByteString
+labelUrl :: Label -> String
 labelUrl label =
-  "http://www.missionbit.com/laptop/" `B.append`
+  B8.unpack $
+  "https://www.missionbit.com/laptop/" `B.append`
   renderQuery True query
  where
-   query = [(k, Just . encodeUtf8 . fv $ label) | (k, fv) <- fields]
+   query = [(k, Just . T.encodeUtf8 . fv $ label) | (k, fv) <- fields]
    fields =
      [ ("name", lName)
      , ("serno", lSerialNo)
      , ("model", lMachineModel)
      , ("ram", lPhysicalMemory)
      , ("cpu", lCpuType)
-     , ("ncpu", lNumberProcessors)
      , ("cpu_speed", lCurrentProcessorSpeed)
      ]
 
 instance FromRow Label where
-  fromRow = Label <$>
-            field <*>
-            field <*>
-            field <*>
-            field <*>
-            field <*>
-            field <*>
-            field
+  fromRow =
+    Label <$>
+    field <*> -- serial_no
+    field <*> -- name
+    field <*> -- cpu_type
+    field <*> -- concurrent_processor_speed
+    field <*> -- physical_memory
+    field     -- machine_model
+
+instance FromNamedRecord Label where
+  parseNamedRecord m =
+    Label <$>
+    m .: "Serial"  <*> -- serial_no
+    m .: "Name"    <*> -- name
+    m .: "CPU"     <*> -- cpu_type
+    pure ""        <*> -- concurrent_processor_speed
+    m .: "RAM"     <*> -- physical_memory
+    m .: "Model"       -- machine_model
+
 
 die :: String -> IO a
 die err = hPutStrLn stderr err >> exitFailure
 
 q :: SQL.Query
 q = "SELECT serial_no, name, cpu_type, current_processor_speed,\
-    \ number_processors, physical_memory, machine_model\
+    \ physical_memory, machine_model\
     \ FROM laptop ORDER BY last_update DESC"
 
 getLabels :: SQL.Connection -> IO [Label]
 getLabels conn = SQL.query_ conn q
 
-renderLabels :: Layout -> [Maybe Label] -> IO L8.ByteString
+renderLabels :: Layout -> [Maybe Label] -> L8.ByteString
 renderLabels layout ls =
-  go <$> mapM f ls
+  go $ map f ls
   where
-    f = maybe (return mempty) (\l -> renderLabel layout l <$> labelQRCode l)
+    f = maybe mempty (\l -> renderLabel layout l $ labelQRCode l)
     go = renderSvg . combine . layoutPages layout
     combine pages = do
       raw
@@ -216,26 +235,44 @@ renderLabel layout label (qrSize, qr) =
     qw = fromIntegral qrSize
     (w, h) = lLabelSize layout
 
-labelQRCode :: Label -> IO (Int, S.Svg)
-labelQRCode label =
-  encodeQR <$>
-    QR.encodeByteString (labelUrl label)
-    Nothing QR.QR_ECLEVEL_M QR.QR_MODE_EIGHT True
+data RowState = RowState !Int !Bool
+
+labelQRCode :: Label -> (Int, S.Svg)
+labelQRCode label = (w, encodedQR)
   where
-    encodeQR qr = (,) w . S.g $
+    Just ver = QR.version 10
+    Just qrMatrix = QR.encode ver QR.M QR.EightBit (labelUrl label)
+    qrArray = QR.toArray qrMatrix
+    (w, h) = snd $ Array.bounds qrArray
+    row y = map (\x -> qrArray Array.! (x, y)) [0..w]
+    qrPath = mapM_ qrRow [0..h]
+    qrRow y = S.m 0 y >> foldM rowFSM (RowState 0 True) (row y) >>= flushFSM
+    rowFSM (RowState n l) l' = case (l, l') of
+      -- Skip when transitioning from light to dark
+      (True, False) -> when (n > 0) (S.mr n 0) >> pure (RowState 1 l')
+      -- Draw when transitioning from dark to light
+      (False, True) -> when (n > 0) (S.hr n) >> pure (RowState 1 l')
+      _             -> pure (RowState (n + 1) l)
+    flushFSM rs = void (rowFSM rs True)
+    encodedQR = S.g $
       S.path
       ! A.class_ "qr"
-      ! A.d (mkPath qrPath)
-      where
-        qrPath =
-          sequence_ (zipWith (qrRow 0) [0..] (map group $ QR.toMatrix qr))
-        qrRow _ _ [] = return ()
-        qrRow !c !r (x:xs) =
-          when (head x /= 0) (m c r *> hr n) *> qrRow c' r xs
-          where
-            n = length x
-            c' = c + n
-        w = QR.getQRCodeWidth qr
+      ! A.d (S.mkPath qrPath)
+
+discardBOM :: BL.ByteString -> BL.ByteString
+discardBOM bs
+  | BL.take 3 bs == bom = discardBOM (BL.drop 3 bs)
+  | otherwise = bs
+  where bom = BL.pack [0xEF,0xBB,0xBF]
+
+readLabels :: (DbType, String) -> IO [Label]
+readLabels (dbType, db) = case dbType of
+  SqliteDb -> SQL.withConnection db getLabels
+  CsvDb    -> do
+    csvData <- discardBOM <$> BL.readFile db
+    case decodeByName csvData of
+      Left err -> putStrLn (filter isAscii err) >> pure []
+      Right (_, v) -> pure $ toList v
 
 main :: IO ()
 main = do
@@ -248,6 +285,5 @@ main = do
   let skips = maybe [] (`replicate` Nothing) (fSkip opts)
       labelFilter names = filter ((`elem` map T.pack names) . lName)
       keep = maybe id labelFilter (fNames opts)
-  labels <- (skips++) . map Just . keep <$> SQL.withConnection db getLabels
-  svg <- renderLabels avery48160 labels
-  L8.putStrLn svg
+  labels <- (skips++) . map Just . keep <$> readLabels db
+  L8.putStrLn $ renderLabels avery48160 labels
