@@ -30,7 +30,8 @@ executable laptop-labels
                        text,
                        safe,
                        split,
-                       array
+                       array,
+                       cassava
   -- hs-source-dirs:      
   default-language:    Haskell2010
   ghc-options: -O2 -Wall
