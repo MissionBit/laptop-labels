@@ -247,15 +247,14 @@ labelQRCode label = (w, encodedQR)
       ! A.class_ "qr"
       ! A.d (S.mkPath qrPath)
     (w, h) = snd $ Array.bounds qrArray
-    qrList = [ [ qrArray Array.! (x, y) | x <- [0..w] ] | y <- [0..h] ]
-    qrPath =
-      sequence_ $ zipWith (qrRow 0) [0..] (map group qrList)
+    row y = group $ map (\x -> qrArray Array.! (x, y)) [0..w]
+    qrPath = mapM_ (\y -> qrRow 0 y (row y)) [0..h]
     qrRow _ _ [] = return ()
-    qrRow !c !r (x:xs) =
-      when (not $ head x) (S.m c r *> S.hr n) *> qrRow c' r xs
+    qrRow !x !y (run:runs) =
+      when (not $ head run) (S.m x y *> S.hr n) *> qrRow x' y runs
       where
-        n = length x
-        c' = c + n
+        n = length run
+        x' = x + n
 
 discardBOM :: BL.ByteString -> BL.ByteString
 discardBOM bs
