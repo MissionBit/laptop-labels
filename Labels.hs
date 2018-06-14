@@ -12,10 +12,12 @@ import Data.Text.Encoding ( encodeUtf8 )
 import Text.Blaze.Svg.Renderer.Utf8 ( renderSvg )
 import qualified Data.ByteString.Lazy.Char8 as L8
 import qualified Data.ByteString as B
-import qualified Data.QRCode as QR
+import qualified Data.ByteString.Char8 as B8
+import qualified Codec.Binary.QRCode as QR
 import Network.HTTP.Types.URI ( renderQuery )
 import Data.List.Split ( chunksOf )
 import Text.Blaze.Svg11 ( (!), m, hr, mkPath )
+import qualified Data.Array as Array
 import qualified Text.Blaze.Svg11 as S
 import qualified Text.Blaze.Svg11.Attributes as A
 import Text.Blaze ( toValue, toMarkup, preEscapedToMarkup )
@@ -105,9 +107,10 @@ labelOrigins layout =
     rows = lRows layout
     cols = lCols layout
 
-labelUrl :: Label -> B.ByteString
+labelUrl :: Label -> String
 labelUrl label =
-  "http://www.missionbit.com/laptop/" `B.append`
+  B8.unpack $
+  "https://www.missionbit.com/laptop/" `B.append`
   renderQuery True query
  where
    query = [(k, Just . encodeUtf8 . fv $ label) | (k, fv) <- fields]
@@ -142,11 +145,11 @@ q = "SELECT serial_no, name, cpu_type, current_processor_speed,\
 getLabels :: SQL.Connection -> IO [Label]
 getLabels conn = SQL.query_ conn q
 
-renderLabels :: Layout -> [Maybe Label] -> IO L8.ByteString
+renderLabels :: Layout -> [Maybe Label] -> L8.ByteString
 renderLabels layout ls =
-  go <$> mapM f ls
+  go $ map f ls
   where
-    f = maybe (return mempty) (\l -> renderLabel layout l <$> labelQRCode l)
+    f = maybe mempty (\l -> renderLabel layout l $ labelQRCode l)
     go = renderSvg . combine . layoutPages layout
     combine pages = do
       raw
@@ -216,26 +219,25 @@ renderLabel layout label (qrSize, qr) =
     qw = fromIntegral qrSize
     (w, h) = lLabelSize layout
 
-labelQRCode :: Label -> IO (Int, S.Svg)
-labelQRCode label =
-  encodeQR <$>
-    QR.encodeByteString (labelUrl label)
-    Nothing QR.QR_ECLEVEL_M QR.QR_MODE_EIGHT True
+labelQRCode :: Label -> (Int, S.Svg)
+labelQRCode label = (w, encodedQR)
   where
-    encodeQR qr = (,) w . S.g $
+    Just ver = QR.version 5
+    Just qrArray = QR.toArray <$> QR.encode ver QR.M QR.EightBit (labelUrl label)
+    encodedQR = S.g $
       S.path
       ! A.class_ "qr"
       ! A.d (mkPath qrPath)
+    (w, h) = snd $ Array.bounds qrArray
+    qrList = [ [ qrArray Array.! (x, y) | x <- [0..w-1] ] | y <- [0..h-1] ]
+    qrPath =
+      sequence_ $ zipWith (qrRow 0) [0..] (map group qrList)
+    qrRow _ _ [] = return ()
+    qrRow !c !r (x:xs) =
+      when (head x) (m c r *> hr n) *> qrRow c' r xs
       where
-        qrPath =
-          sequence_ (zipWith (qrRow 0) [0..] (map group $ QR.toMatrix qr))
-        qrRow _ _ [] = return ()
-        qrRow !c !r (x:xs) =
-          when (head x /= 0) (m c r *> hr n) *> qrRow c' r xs
-          where
-            n = length x
-            c' = c + n
-        w = QR.getQRCodeWidth qr
+        n = length x
+        c' = c + n
 
 main :: IO ()
 main = do
@@ -249,5 +251,4 @@ main = do
       labelFilter names = filter ((`elem` map T.pack names) . lName)
       keep = maybe id labelFilter (fNames opts)
   labels <- (skips++) . map Just . keep <$> SQL.withConnection db getLabels
-  svg <- renderLabels avery48160 labels
-  L8.putStrLn svg
+  L8.putStrLn $ renderLabels avery48160 labels
