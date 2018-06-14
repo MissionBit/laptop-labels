@@ -5,8 +5,7 @@ import System.IO ( stderr, hPutStrLn )
 import Data.Text ( Text )
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
-import Data.List ( group )
-import Control.Applicative ( (<$>), (<*>), (*>) )
+import Control.Applicative ( (<$>), (<*>) )
 import qualified Database.SQLite.Simple as SQL
 import Database.SQLite.Simple.FromRow ( FromRow, field )
 import Text.Blaze.Svg.Renderer.Utf8 ( renderSvg )
@@ -21,7 +20,7 @@ import qualified Data.Array as Array
 import qualified Text.Blaze.Svg11 as S
 import qualified Text.Blaze.Svg11.Attributes as A
 import Text.Blaze ( toValue, toMarkup, preEscapedToMarkup )
-import Control.Monad ( when )
+import Control.Monad ( when, foldM, void )
 import Data.Monoid ( mempty, (<>) )
 import System.Console.GetOpt
   ( ArgOrder(..), OptDescr(..), ArgDescr(..), getOpt, usageInfo )
@@ -236,25 +235,29 @@ renderLabel layout label (qrSize, qr) =
     qw = fromIntegral qrSize
     (w, h) = lLabelSize layout
 
+data RowState = RowState !Int !Bool
+
 labelQRCode :: Label -> (Int, S.Svg)
 labelQRCode label = (w, encodedQR)
   where
     Just ver = QR.version 10
     Just qrMatrix = QR.encode ver QR.M QR.EightBit (labelUrl label)
     qrArray = QR.toArray qrMatrix
+    (w, h) = snd $ Array.bounds qrArray
+    row y = map (\x -> qrArray Array.! (x, y)) [0..w]
+    qrPath = mapM_ qrRow [0..h]
+    qrRow y = S.m 0 y >> foldM rowFSM (RowState 0 True) (row y) >>= flushFSM
+    rowFSM (RowState n l) l' = case (l, l') of
+      -- Skip when transitioning from light to dark
+      (True, False) -> when (n > 0) (S.mr n 0) >> pure (RowState 1 l')
+      -- Draw when transitioning from dark to light
+      (False, True) -> when (n > 0) (S.hr n) >> pure (RowState 1 l')
+      _             -> pure (RowState (n + 1) l)
+    flushFSM rs = void (rowFSM rs True)
     encodedQR = S.g $
       S.path
       ! A.class_ "qr"
       ! A.d (S.mkPath qrPath)
-    (w, h) = snd $ Array.bounds qrArray
-    row y = group $ map (\x -> qrArray Array.! (x, y)) [0..w]
-    qrPath = mapM_ (\y -> qrRow 0 y (row y)) [0..h]
-    qrRow _ _ [] = return ()
-    qrRow !x !y (run:runs) =
-      when (not $ head run) (S.m x y *> S.hr n) *> qrRow x' y runs
-      where
-        n = length run
-        x' = x + n
 
 discardBOM :: BL.ByteString -> BL.ByteString
 discardBOM bs
