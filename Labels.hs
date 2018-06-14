@@ -54,7 +54,7 @@ setSkip s f = f { fSkip = s >>= readMay }
 options :: [OptDescr (Flags -> Flags)]
 options =
   [ Option ['d'] ["db"]   (OptArg (setDb SqliteDb) "FILE") "read labels from SQLite3 db"
-  , Option ['d'] ["csv"]  (OptArg (setDb CsvDb)    "FILE") "read labels from Meraki CSV"
+  , Option ['c'] ["csv"]  (OptArg (setDb CsvDb)    "FILE") "read labels from Meraki CSV"
   , Option ['n'] ["name"] (OptArg addName          "NAME") "print label for only NAME"
   , Option ['s'] ["skip"] (OptArg setSkip          "SKIP") "number of labels to skip"
   ]
